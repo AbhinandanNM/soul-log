@@ -17,26 +17,39 @@ const {
   NODE_ENV = "production",
 } = process.env;
 
-if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
-  throw new Error("Missing Google OAuth credentials. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.");
-}
+// Validate environment variables (but don't throw at module load - handle gracefully)
+const validateEnv = () => {
+  const missing: string[] = [];
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    missing.push("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET");
+  }
+  if (!DATABASE_URL) {
+    missing.push("DATABASE_URL");
+  }
+  if (!SESSION_SECRET) {
+    missing.push("SESSION_SECRET");
+  }
+  return missing;
+};
 
-if (!DATABASE_URL) {
-  throw new Error("Missing DATABASE_URL environment variable.");
-}
+// Initialize database pool only if DATABASE_URL is available
+let pool: Pool | null = null;
 
-if (!SESSION_SECRET) {
-  throw new Error("Missing SESSION_SECRET environment variable.");
+if (DATABASE_URL) {
+  try {
+    pool = new Pool({
+      connectionString: DATABASE_URL,
+      ssl: process.env.PGSSLMODE === "require" || DATABASE_URL.includes("supabase.co") 
+        ? { rejectUnauthorized: false } 
+        : undefined,
+    });
+  } catch (error) {
+    console.error("Failed to create database pool:", error);
+  }
 }
-
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: process.env.PGSSLMODE === "require" || DATABASE_URL.includes("supabase.co") 
-    ? { rejectUnauthorized: false } 
-    : undefined,
-});
 
 const ensureDatabaseSetup = async () => {
+  if (!pool) return;
   try {
     await pool.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`);
     await pool.query(`
@@ -55,8 +68,10 @@ const ensureDatabaseSetup = async () => {
   }
 };
 
-// Initialize database setup
-void ensureDatabaseSetup();
+// Initialize database setup (non-blocking)
+if (pool) {
+  void ensureDatabaseSetup();
+}
 
 type DbUser = {
   id: string;
@@ -68,7 +83,8 @@ type DbUser = {
   updated_at: string;
 };
 
-const PgSessionStore = pgSession(session);
+// Only initialize session store if we have a database pool
+const PgSessionStore = pool ? pgSession(session) : undefined;
 
 export const app = express();
 
@@ -101,26 +117,31 @@ app.use(
 app.use(cookieParser());
 app.use(express.json());
 
-app.use(
-  session({
-    store: new PgSessionStore({
-      pool,
-      tableName: "session",
-      createTableIfMissing: true,
-    }),
-    name: "soul_log.sid",
-    secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      secure: NODE_ENV === "production",
-      sameSite: NODE_ENV === "production" ? "lax" : "lax",
-      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
-      domain: NODE_ENV === "production" ? undefined : undefined, // Let Vercel handle domain
-    },
-  }),
-);
+// Session configuration - only use database store if pool is available
+const sessionConfig: session.SessionOptions = {
+  name: "soul_log.sid",
+  secret: SESSION_SECRET || "temp-secret-change-in-production",
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: NODE_ENV === "production",
+    sameSite: NODE_ENV === "production" ? "lax" : "lax",
+    maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
+    domain: NODE_ENV === "production" ? undefined : undefined, // Let Vercel handle domain
+  },
+};
+
+// Add database store only if pool is available
+if (PgSessionStore && pool) {
+  sessionConfig.store = new PgSessionStore({
+    pool,
+    tableName: "session",
+    createTableIfMissing: true,
+  });
+}
+
+app.use(session(sessionConfig));
 
 app.use(passport.initialize());
 app.use(passport.session());
@@ -130,6 +151,9 @@ passport.serializeUser((user, done) => {
 });
 
 passport.deserializeUser(async (id: string, done) => {
+  if (!pool) {
+    return done(new Error("Database not configured"), null);
+  }
   try {
     const { rows } = await pool.query<DbUser>("SELECT * FROM users WHERE id = $1", [id]);
     if (!rows.length) {
@@ -166,15 +190,20 @@ const getCallbackURL = () => {
   return `${CLIENT_URL}/api/auth/google/callback`;
 };
 
-passport.use(
-  new GoogleStrategy(
-    {
-      clientID: GOOGLE_CLIENT_ID,
-      clientSecret: GOOGLE_CLIENT_SECRET,
-      callbackURL: getCallbackURL(),
-      passReqToCallback: true,
-    },
+// Only configure Passport if credentials are available
+if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
+  passport.use(
+    new GoogleStrategy(
+      {
+        clientID: GOOGLE_CLIENT_ID,
+        clientSecret: GOOGLE_CLIENT_SECRET,
+        callbackURL: getCallbackURL(),
+        passReqToCallback: true,
+      },
     async (_req, _accessToken, _refreshToken, profile: Profile, done) => {
+      if (!pool) {
+        return done(new Error("Database not configured"), null);
+      }
       try {
         const googleId = profile.id;
         const email = profile.emails?.[0]?.value ?? null;
@@ -223,11 +252,20 @@ passport.use(
         done(error as Error);
       }
     },
-  ),
-);
+    ),
+  );
+}
 
-// Health check endpoint
+// Health check endpoint - should work even if env vars are missing
 app.get("/api/health", (_req, res) => {
+  const missing = validateEnv();
+  if (missing.length > 0) {
+    return res.status(503).json({ 
+      status: "error", 
+      message: "Missing environment variables",
+      missing 
+    });
+  }
   res.json({ status: "ok" });
 });
 
@@ -237,6 +275,9 @@ app.get("/health", (_req, res) => {
 
 // Google OAuth routes (Vercel API routes)
 app.get("/api/auth/google", (req, res, next) => {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return res.status(500).json({ error: "Google OAuth not configured" });
+  }
   if (req.query.returnTo && typeof req.query.returnTo === "string") {
     req.session.returnTo = req.query.returnTo;
   }
