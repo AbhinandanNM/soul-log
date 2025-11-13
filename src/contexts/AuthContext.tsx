@@ -83,13 +83,45 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const value = useMemo<AuthContextValue>(() => {
     const signInWithGoogle = (returnTo?: string) => {
-      const url = new URL(buildUrl("/auth/google"));
+      try {
+        // Build the full URL for Google OAuth
+        const authPath = buildUrl("/auth/google");
+        let authUrl: string;
+        
+        // If it's already a full URL, use it directly
+        if (authPath.startsWith("http")) {
+          authUrl = authPath;
+        } else {
+          // For production, use window.location.origin
+          // For development, use API_BASE_URL
+          const baseUrl = API_BASE_URL || window.location.origin;
+          // Ensure we have a proper absolute URL
+          authUrl = `${baseUrl}${authPath.startsWith("/") ? authPath : `/${authPath}`}`;
+        }
+        
+        // Add returnTo parameter if provided
+        if (returnTo) {
+          try {
+            const url = new URL(authUrl);
+            url.searchParams.set("returnTo", returnTo);
+            authUrl = url.toString();
+          } catch (urlError) {
+            // Fallback: append as query string
+            const separator = authUrl.includes("?") ? "&" : "?";
+            authUrl = `${authUrl}${separator}returnTo=${encodeURIComponent(returnTo)}`;
+          }
+        }
 
-      if (returnTo) {
-        url.searchParams.set("returnTo", returnTo);
+        // Log for debugging (remove in production if needed)
+        console.log("Redirecting to Google OAuth:", authUrl);
+
+        // Redirect to Google OAuth
+        window.location.href = authUrl;
+      } catch (error) {
+        console.error("Error initiating Google sign-in:", error);
+        // Show user-friendly error
+        alert("Failed to initiate Google sign-in. Please check the console for details.");
       }
-
-      window.location.href = url.toString();
     };
 
     const signOut = async () => {
