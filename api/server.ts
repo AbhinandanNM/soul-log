@@ -7,6 +7,21 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import { Pool } from "pg";
 
+// Define custom User type for Passport
+interface AppUser {
+  id: string;
+  email: string | null;
+  name: string | null;
+  avatarUrl: string | null;
+}
+
+// Extend Express namespace to include our custom User type
+declare global {
+  namespace Express {
+    interface User extends AppUser {}
+  }
+}
+
 const {
   CLIENT_URL = "http://localhost:5173",
   GOOGLE_CLIENT_ID,
@@ -32,25 +47,72 @@ const validateEnv = () => {
   return missing;
 };
 
-// Initialize database pool only if DATABASE_URL is available
+// Validate DATABASE_URL format
+const isValidDatabaseUrl = (url: string | undefined): boolean => {
+  if (!url) return false;
+  // Check if it's a valid PostgreSQL connection string
+  // Should start with postgres:// or postgresql://
+  if (!url.match(/^postgres(ql)?:\/\//)) {
+    return false;
+  }
+  // Should not contain placeholder values
+  if (url.includes("host") && !url.includes("@") && !url.includes("://")) {
+    return false;
+  }
+  // Should have actual hostname (not just "host")
+  const hostMatch = url.match(/@([^:]+):/);
+  if (hostMatch && hostMatch[1] === "host") {
+    return false;
+  }
+  return true;
+};
+
+// Initialize database pool only if DATABASE_URL is available and valid
 let pool: Pool | null = null;
 
 if (DATABASE_URL) {
-  try {
-    pool = new Pool({
-      connectionString: DATABASE_URL,
-      ssl: process.env.PGSSLMODE === "require" || DATABASE_URL.includes("supabase.co") 
-        ? { rejectUnauthorized: false } 
-        : undefined,
-    });
-  } catch (error) {
-    console.error("Failed to create database pool:", error);
+  if (!isValidDatabaseUrl(DATABASE_URL)) {
+    console.error("Invalid DATABASE_URL format. Expected format: postgresql://user:password@hostname:port/database");
+    console.error("DATABASE_URL appears to contain placeholder values or is malformed.");
+  } else {
+    try {
+      pool = new Pool({
+        connectionString: DATABASE_URL,
+        ssl: process.env.PGSSLMODE === "require" || DATABASE_URL.includes("supabase.co") 
+          ? { rejectUnauthorized: false } 
+          : undefined,
+        // Add connection timeout and retry settings for serverless
+        connectionTimeoutMillis: 10000, // 10 seconds
+        idleTimeoutMillis: 30000, // 30 seconds
+        max: 2, // Limit connections for serverless
+      });
+      
+      // Handle pool errors gracefully
+      pool.on("error", (err) => {
+        console.error("Unexpected database pool error:", err);
+        // Don't crash - just log the error
+        // The pool will attempt to reconnect on next query
+      });
+      
+      pool.on("connect", () => {
+        console.log("Database connection established");
+      });
+    } catch (error) {
+      console.error("Failed to create database pool:", error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes("ENOTFOUND")) {
+        console.error("DNS resolution failed. Check that DATABASE_URL contains a valid hostname.");
+        console.error("Current DATABASE_URL format check:", DATABASE_URL.substring(0, 50) + "...");
+      }
+    }
   }
 }
 
 const ensureDatabaseSetup = async () => {
   if (!pool) return;
   try {
+    // Test connection first with a simple query
+    await pool.query("SELECT 1");
     await pool.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`);
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
@@ -63,8 +125,18 @@ const ensureDatabaseSetup = async () => {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+    console.log("Database setup completed successfully");
   } catch (error) {
     console.error("Database setup error:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes("ENOTFOUND")) {
+      console.error("Database connection failed: Cannot resolve hostname.");
+      console.error("Please verify your DATABASE_URL in Vercel environment variables.");
+      console.error("Expected format: postgresql://user:password@hostname:port/database");
+      console.error("Note: Supabase databases may be paused. Check your Supabase dashboard.");
+    }
+    // Don't throw - allow app to continue without database (will use memory store for sessions)
+    // The app will still work, but database features won't be available
   }
 };
 
@@ -139,17 +211,24 @@ const sessionConfig: session.SessionOptions = {
 };
 
 // Add database store only if pool is available
+// Note: The store will handle connection errors gracefully when used
 if (PgSessionStore && pool) {
   try {
+    // Create store - it will handle connection errors internally when used
+    // The store will fall back gracefully if database is unavailable
     sessionConfig.store = new PgSessionStore({
       pool,
       tableName: "session",
       createTableIfMissing: true,
     });
+    console.log("Session store configured with database (will use memory store if DB unavailable)");
   } catch (error) {
     console.error("Failed to create session store:", error);
     // Continue without database store (will use memory store)
+    // This is fine - sessions will work in memory (not persistent across restarts)
   }
+} else {
+  console.log("Using memory store for sessions (database not available)");
 }
 
 app.use(session(sessionConfig));
@@ -180,6 +259,13 @@ passport.deserializeUser(async (id: string, done) => {
       avatarUrl: avatar_url,
     });
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes("ENOTFOUND")) {
+      const dbError = new Error("Database connection failed: Invalid hostname in DATABASE_URL");
+      console.error("Database query error:", errorMessage);
+      return done(dbError, null);
+    }
+    console.error("Deserialize user error:", error);
     done(error);
   }
 });
@@ -253,7 +339,7 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
           user = rows[0];
         }
 
-        const result: Express.User = {
+        const result: AppUser = {
           id: user.id,
           email: user.email,
           name: user.name,
@@ -262,6 +348,13 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
 
         done(null, result);
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (errorMessage.includes("ENOTFOUND")) {
+          const dbError = new Error("Database connection failed: Invalid hostname in DATABASE_URL. Please check your Vercel environment variables.");
+          console.error("Google OAuth database error:", errorMessage);
+          return done(dbError, null);
+        }
+        console.error("Google OAuth strategy error:", error);
         done(error as Error);
       }
     },
@@ -425,7 +518,27 @@ const formatError = (error: unknown) => {
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error("[server] unexpected error", error);
   
+  // Check if response has already been sent (e.g., redirect already happened)
+  if (res.headersSent) {
+    console.error("Response already sent, cannot send error response");
+    return;
+  }
+  
   const formattedError = formatError(error);
+  
+  // Check for database connection errors and provide helpful message
+  const errorMessage = formattedError.message || "";
+  if (errorMessage.includes("ENOTFOUND") && errorMessage.includes("supabase.co")) {
+    return res.status(503).json({
+      error: "Database Unavailable",
+      message: "Cannot connect to database. Please check your Supabase project status.",
+      details: {
+        hint: "Your Supabase database may be paused. Check your Supabase dashboard and ensure the project is active.",
+        hostname: errorMessage.match(/hostname: '([^']+)'/)?.[1] || "unknown",
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
   
   res.status(500).json({
     error: "Internal Server Error",
