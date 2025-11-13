@@ -1,7 +1,31 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { app } from "./server";
+
+// Lazy load server to avoid crashes at module load time
+let app: any = null;
+
+const getApp = async () => {
+  if (!app) {
+    try {
+      const serverModule = await import("./server");
+      app = serverModule.app;
+    } catch (error) {
+      console.error("Failed to load server:", error);
+      throw error;
+    }
+  }
+  return app;
+};
 
 // Catch-all handler for all API routes - routes to Express app
-export default function handler(req: VercelRequest, res: VercelResponse) {
-  return app(req as any, res as any);
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  try {
+    const expressApp = await getApp();
+    return expressApp(req as any, res as any);
+  } catch (error) {
+    console.error("Handler error:", error);
+    return res.status(500).json({
+      error: "Internal Server Error",
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
 }

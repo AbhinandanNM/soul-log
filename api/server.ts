@@ -84,7 +84,13 @@ type DbUser = {
 };
 
 // Only initialize session store if we have a database pool
-const PgSessionStore = pool ? pgSession(session) : undefined;
+let PgSessionStore: ReturnType<typeof pgSession> | undefined;
+try {
+  PgSessionStore = pool ? pgSession(session) : undefined;
+} catch (error) {
+  console.error("Failed to initialize session store:", error);
+  PgSessionStore = undefined;
+}
 
 export const app = express();
 
@@ -134,11 +140,16 @@ const sessionConfig: session.SessionOptions = {
 
 // Add database store only if pool is available
 if (PgSessionStore && pool) {
-  sessionConfig.store = new PgSessionStore({
-    pool,
-    tableName: "session",
-    createTableIfMissing: true,
-  });
+  try {
+    sessionConfig.store = new PgSessionStore({
+      pool,
+      tableName: "session",
+      createTableIfMissing: true,
+    });
+  } catch (error) {
+    console.error("Failed to create session store:", error);
+    // Continue without database store (will use memory store)
+  }
 }
 
 app.use(session(sessionConfig));
