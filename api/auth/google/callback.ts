@@ -6,7 +6,8 @@ let app: any = null;
 const getApp = async () => {
   if (!app) {
     try {
-      const serverModule = await import("../../server");
+      // Use .js extension as that's what it will be after compilation
+      const serverModule = await import("../../server.js");
       app = serverModule.app;
     } catch (error) {
       console.error("Failed to load server:", error);
