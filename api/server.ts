@@ -191,10 +191,12 @@ const getCallbackURL = () => {
   }
   
   if (NODE_ENV === "production") {
-    // In Vercel, use the Vercel URL or custom domain
-    const baseUrl = process.env.VERCEL_URL 
-      ? `https://${process.env.VERCEL_URL}` 
-      : process.env.CLIENT_URL || CLIENT_URL;
+    // In Vercel, prioritize CLIENT_URL, then VERCEL_URL
+    const baseUrl = CLIENT_URL && CLIENT_URL !== "http://localhost:5173"
+      ? CLIENT_URL
+      : process.env.VERCEL_URL 
+        ? `https://${process.env.VERCEL_URL}` 
+        : "https://soul-log-kappa.vercel.app";
     return `${baseUrl}/api/auth/google/callback`;
   }
   
@@ -405,8 +407,30 @@ app.post("/auth/logout", (req, res, next) => {
   });
 });
 
+// Pretty error formatter
+const formatError = (error: unknown) => {
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+      name: error.name,
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    };
+  }
+  return {
+    message: String(error),
+    name: "UnknownError",
+  };
+};
+
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error("[server] unexpected error", error);
-  res.status(500).json({ error: "Internal Server Error" });
+  
+  const formattedError = formatError(error);
+  
+  res.status(500).json({
+    error: "Internal Server Error",
+    details: formattedError,
+    timestamp: new Date().toISOString(),
+  });
 });
 

@@ -23,9 +23,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return expressApp(req as any, res as any);
   } catch (error) {
     console.error("Handler error:", error);
+    const errorDetails = error instanceof Error 
+      ? {
+          message: error.message,
+          name: error.name,
+          stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+        }
+      : { message: String(error) };
+    
     return res.status(500).json({
       error: "Internal Server Error",
-      message: error instanceof Error ? error.message : "Unknown error",
+      details: errorDetails,
+      timestamp: new Date().toISOString(),
+      path: "/api/auth/google",
     });
   }
 }

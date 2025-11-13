@@ -26,10 +26,19 @@ export default function handler(_req: VercelRequest, res: VercelResponse) {
     return res.json({ status: "ok" });
   } catch (error) {
     console.error("Health check error:", error);
+    const errorDetails = error instanceof Error 
+      ? {
+          message: error.message,
+          name: error.name,
+          stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+        }
+      : { message: String(error) };
+    
     return res.status(500).json({
       status: "error",
       message: "Health check failed",
-      error: error instanceof Error ? error.message : "Unknown error",
+      details: errorDetails,
+      timestamp: new Date().toISOString(),
     });
   }
 }
