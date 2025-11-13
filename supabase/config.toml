@@ -1,0 +1,10 @@
+project_id = "fswrcongmzgitgklawvf"
+
+[functions.mind-feedback]
+verify_jwt = false
+
+[functions.body-feedback]
+verify_jwt = false
+
+[functions.soul-feedback]
+verify_jwt = false
