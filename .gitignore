@@ -44,3 +44,5 @@ Thumbs.db
 # Debug
 *.pdb
 *.idb
+
+.vercel
