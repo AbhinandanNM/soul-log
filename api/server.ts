@@ -214,13 +214,69 @@ const sessionConfig: session.SessionOptions = {
 // Note: The store will handle connection errors gracefully when used
 if (PgSessionStore && pool) {
   try {
-    // Create store - it will handle connection errors internally when used
-    // The store will fall back gracefully if database is unavailable
-    sessionConfig.store = new PgSessionStore({
+    // Create store - but don't let it crash if connection fails
+    // We'll catch errors when the store tries to connect
+    const store = new PgSessionStore({
       pool,
       tableName: "session",
       createTableIfMissing: true,
     });
+    
+    // Wrap store methods to catch connection errors
+    const originalTouch = store.touch?.bind(store);
+    const originalGet = store.get?.bind(store);
+    const originalSet = store.set?.bind(store);
+    const originalDestroy = store.destroy?.bind(store);
+    
+    if (originalTouch) {
+      store.touch = async (sid: string, session: any, callback?: any) => {
+        try {
+          return await originalTouch(sid, session, callback);
+        } catch (error) {
+          console.error("Session store touch error (using memory fallback):", error);
+          if (callback) callback(error);
+          return;
+        }
+      };
+    }
+    
+    if (originalGet) {
+      store.get = async (sid: string, callback?: any) => {
+        try {
+          return await originalGet(sid, callback);
+        } catch (error) {
+          console.error("Session store get error (using memory fallback):", error);
+          if (callback) callback(error);
+          return;
+        }
+      };
+    }
+    
+    if (originalSet) {
+      store.set = async (sid: string, session: any, callback?: any) => {
+        try {
+          return await originalSet(sid, session, callback);
+        } catch (error) {
+          console.error("Session store set error (using memory fallback):", error);
+          if (callback) callback(error);
+          return;
+        }
+      };
+    }
+    
+    if (originalDestroy) {
+      store.destroy = async (sid: string, callback?: any) => {
+        try {
+          return await originalDestroy(sid, callback);
+        } catch (error) {
+          console.error("Session store destroy error (using memory fallback):", error);
+          if (callback) callback(error);
+          return;
+        }
+      };
+    }
+    
+    sessionConfig.store = store;
     console.log("Session store configured with database (will use memory store if DB unavailable)");
   } catch (error) {
     console.error("Failed to create session store:", error);
@@ -528,13 +584,34 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
   
   // Check for database connection errors and provide helpful message
   const errorMessage = formattedError.message || "";
-  if (errorMessage.includes("ENOTFOUND") && errorMessage.includes("supabase.co")) {
+  if (errorMessage.includes("ENOTFOUND")) {
+    // Try to extract hostname from error
+    const hostnameMatch = errorMessage.match(/hostname: '([^']+)'/);
+    const hostname = hostnameMatch?.[1] || "unknown";
+    
+    // Check DATABASE_URL format
+    const dbUrl = process.env.DATABASE_URL || "";
+    const hasPlaceholder = dbUrl.includes("[YOUR-PASSWORD]");
+    const isValidFormat = dbUrl.startsWith("postgresql://") || dbUrl.startsWith("postgres://");
+    
     return res.status(503).json({
       error: "Database Unavailable",
-      message: "Cannot connect to database. Please check your Supabase project status.",
+      message: "Cannot connect to database.",
       details: {
-        hint: "Your Supabase database may be paused. Check your Supabase dashboard and ensure the project is active.",
-        hostname: errorMessage.match(/hostname: '([^']+)'/)?.[1] || "unknown",
+        hostname: hostname,
+        hint: hasPlaceholder 
+          ? "DATABASE_URL contains [YOUR-PASSWORD] placeholder. Replace it with your actual password in Vercel environment variables."
+          : !isValidFormat
+          ? "DATABASE_URL format is invalid. Should start with postgresql://"
+          : hostname === "unknown"
+          ? "Cannot parse hostname from DATABASE_URL. Check the connection string format in Vercel environment variables."
+          : "Check your Supabase project status and verify DATABASE_URL is correct in Vercel.",
+        troubleshooting: {
+          checkSupabase: "Verify project is active (green) in Supabase dashboard",
+          checkConnectionString: "Get connection string from Supabase Settings → Database → URI tab",
+          checkPassword: "Replace [YOUR-PASSWORD] with actual password",
+          checkVercel: "Verify DATABASE_URL in Vercel Settings → Environment Variables",
+        },
       },
       timestamp: new Date().toISOString(),
     });

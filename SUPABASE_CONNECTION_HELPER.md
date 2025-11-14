@@ -73,3 +73,5 @@ If you get connection errors, double-check:
 - Host address is correct
 - `PGSSLMODE=require` is set (Supabase requires SSL)
 
+
+
