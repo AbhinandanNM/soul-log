@@ -8,11 +8,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/contexts/AuthContext";
 
 type JournalFilter = "all" | "mind" | "body" | "soul";
 
 const Journal = () => {
   const { toast } = useToast();
+  const { user } = useAuth();
   const [filter, setFilter] = useState<JournalFilter>("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [entries, setEntries] = useState<
@@ -26,61 +29,37 @@ const Journal = () => {
     }>
   >([]);
 
-  const loadEntries = useCallback(() => {
-    if (typeof window === "undefined") return;
+  const fetchEntries = useCallback(async () => {
+    if (!user) return;
 
-    try {
-      const mindEntries: Array<{ id: string; createdAt: string; mood: string; thoughts: string }> = JSON.parse(
-        window.localStorage.getItem("soul-log:mind-entries") ?? "[]",
-      );
-      const bodyEntries: Array<{ id: string; createdAt: string; category: string; entry: string }> = JSON.parse(
-        window.localStorage.getItem("soul-log:body-entries") ?? "[]",
-      );
-      const soulEntries: Array<{ id: string; createdAt: string; category: string; entry: string }> = JSON.parse(
-        window.localStorage.getItem("soul-log:soul-entries") ?? "[]",
-      );
+    const { data, error } = await supabase
+      .from("entries")
+      .select("*")
+      .order("created_at", { ascending: false });
 
-      const mapped = [
-        ...mindEntries.map((entry) => ({
-          id: entry.id,
-          date: new Date(entry.createdAt),
-          type: "mind" as const,
-          title: `Mind check-in (${entry.mood})`,
-          content: entry.thoughts,
-          category: "Mind",
-        })),
-        ...bodyEntries.map((entry) => ({
-          id: entry.id,
-          date: new Date(entry.createdAt),
-          type: "body" as const,
-          title: `Body ${entry.category} update`,
-          content: entry.entry,
-          category: "Body",
-        })),
-        ...soulEntries.map((entry) => ({
-          id: entry.id,
-          date: new Date(entry.createdAt),
-          type: "soul" as const,
-          title: `Soul ${entry.category} reflection`,
-          content: entry.entry,
-          category: "Soul",
-        })),
-      ].sort((a, b) => b.date.getTime() - a.date.getTime());
-
-      setEntries(mapped);
-    } catch (error) {
-      console.error("Failed to read journal entries", error);
+    if (error) {
+      console.error("Error fetching journal entries:", error);
       toast({
         title: "Unable to load journal",
-        description: "We had trouble reading saved entries. Try refreshing the page.",
+        description: error.message,
         variant: "destructive",
       });
+    } else {
+      const mapped = data.map((entry: any) => ({
+        id: entry.id,
+        date: new Date(entry.created_at),
+        type: entry.type as "mind" | "body" | "soul",
+        title: entry.title || `${entry.type.charAt(0).toUpperCase() + entry.type.slice(1)} Entry`,
+        content: entry.content,
+        category: entry.category || "General",
+      }));
+      setEntries(mapped);
     }
-  }, [toast]);
+  }, [user, toast]);
 
   useEffect(() => {
-    loadEntries();
-  }, [loadEntries]);
+    fetchEntries();
+  }, [fetchEntries]);
 
   const filteredEntries = useMemo(() => {
     const byType = filter === "all" ? entries : entries.filter((entry) => entry.type === filter);
@@ -158,7 +137,7 @@ const Journal = () => {
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <Navbar />
-      
+
       <main className="flex-1 py-12">
         <div className="container mx-auto px-4 max-w-6xl">
           <div className="mb-8 text-center">
@@ -222,7 +201,7 @@ const Journal = () => {
                       variant="outline"
                       className="gap-2"
                       onClick={() => {
-                        loadEntries();
+                        fetchEntries();
                         toast({
                           title: "Journal refreshed",
                           description: "Pulled the latest entries from your wellness logs.",

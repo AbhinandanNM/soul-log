@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Brain, Plus, Smile, Meh, Frown, BarChart3, RefreshCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -7,14 +7,14 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
-import { usePersistentState } from "@/hooks/usePersistentState";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { ResponsiveContainer, BarChart, Bar, CartesianGrid, XAxis, YAxis } from "recharts";
-import { createId } from "@/lib/utils";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/contexts/AuthContext";
 
 interface MindEntry {
   id: string;
-  createdAt: string;
+  created_at: string;
   mood: "happy" | "neutral" | "sad";
   thoughts: string;
 }
@@ -52,7 +52,7 @@ const generateMindFeedback = (mood: MindEntry["mood"], thoughts: string) => {
 
   return `${encouragement[mood]}
 
-You captured: “${highlights || "..." }”
+You captured: “${highlights || "..."}”
 
 Consider exploring:
 • ${prompts[mood][0]}
@@ -63,14 +63,46 @@ Keep listening to yourself—awareness is healing.`;
 
 const Mind = () => {
   const { toast } = useToast();
-  const [entries, setEntries, resetEntries] = usePersistentState<MindEntry[]>("soul-log:mind-entries", []);
-  const [selectedMood, setSelectedMood] = usePersistentState<"happy" | "neutral" | "sad" | null>(
-    "soul-log:mind-draft-mood",
-    null,
-  );
-  const [thoughts, setThoughts] = usePersistentState<string>("soul-log:mind-draft-thoughts", "");
-  const [aiFeedback, setAiFeedback] = usePersistentState<string>("soul-log:mind-feedback", "");
+  const { user } = useAuth();
+  const [entries, setEntries] = useState<MindEntry[]>([]);
+  const [selectedMood, setSelectedMood] = useState<"happy" | "neutral" | "sad" | null>(null);
+  const [thoughts, setThoughts] = useState("");
+  const [aiFeedback, setAiFeedback] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
+
+  useEffect(() => {
+    if (user) {
+      fetchEntries();
+    }
+  }, [user]);
+
+  const fetchEntries = async () => {
+    const { data, error } = await supabase
+      .from("entries")
+      .select("*")
+      .eq("type", "mind")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("Error fetching entries:", error);
+      toast({
+        title: "Error fetching entries",
+        description: error.message,
+        variant: "destructive",
+      });
+    } else {
+      // Map database columns to local state shape if needed, or adjust interface
+      // Here assuming DB columns match interface (snake_case vs camelCase needs attention)
+      // DB: created_at, mood, content (mapped to thoughts)
+      const mappedEntries = data.map((e: any) => ({
+        id: e.id,
+        created_at: e.created_at,
+        mood: e.mood,
+        thoughts: e.content, // Map content to thoughts
+      }));
+      setEntries(mappedEntries);
+    }
+  };
 
   const moodSummary = useMemo(() => {
     const totalEntries = entries.length || 1;
@@ -81,7 +113,7 @@ const Mind = () => {
 
     const mostCommon = counts.reduce((prev, current) => (current.value > prev.value ? current : prev), counts[0]);
     const today = new Date().toDateString();
-    const mindfulToday = entries.some((entry) => new Date(entry.createdAt).toDateString() === today);
+    const mindfulToday = entries.some((entry) => new Date(entry.created_at).toDateString() === today);
 
     return {
       counts,
@@ -92,8 +124,17 @@ const Mind = () => {
     };
   }, [entries]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!user) {
+      toast({
+        title: "Authentication required",
+        description: "Please sign in to save entries.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     if (!selectedMood || !thoughts.trim()) {
       toast({
         title: "Missing information",
@@ -105,29 +146,52 @@ const Mind = () => {
 
     setIsGenerating(true);
     const feedback = generateMindFeedback(selectedMood, thoughts);
-    const newEntry: MindEntry = {
-      id: createId(),
-      createdAt: new Date().toISOString(),
-      mood: selectedMood,
-      thoughts,
-    };
 
-    setEntries([newEntry, ...entries]);
-    setSelectedMood(null);
-    setThoughts("");
-    setAiFeedback(feedback);
+    const { data, error } = await supabase
+      .from("entries")
+      .insert([
+        {
+          user_id: user.id,
+          type: "mind",
+          mood: selectedMood,
+          content: thoughts,
+          category: "Mind", // Default category
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error saving entry:", error);
+      toast({
+        title: "Error saving entry",
+        description: error.message,
+        variant: "destructive",
+      });
+    } else {
+      const newEntry: MindEntry = {
+        id: data.id,
+        created_at: data.created_at,
+        mood: data.mood,
+        thoughts: data.content,
+      };
+      setEntries([newEntry, ...entries]);
+      setSelectedMood(null);
+      setThoughts("");
+      setAiFeedback(feedback);
+
+      toast({
+        title: "Entry saved!",
+        description: "Your reflective coach left guidance below.",
+      });
+    }
     setIsGenerating(false);
-
-    toast({
-      title: "Entry saved!",
-      description: "Your reflective coach left guidance below.",
-    });
   };
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <Navbar />
-      
+
       <main className="flex-1 py-12">
         <div className="container mx-auto px-4 max-w-4xl">
           <div className="mb-8 text-center">
@@ -159,11 +223,10 @@ const Mind = () => {
                         key={value}
                         type="button"
                         onClick={() => setSelectedMood(value)}
-                        className={`flex flex-1 flex-col items-center gap-2 rounded-lg border-2 p-4 transition-all ${
-                          selectedMood === value
+                        className={`flex flex-1 flex-col items-center gap-2 rounded-lg border-2 p-4 transition-all ${selectedMood === value
                             ? "border-primary bg-accent shadow-soft"
                             : "border-border hover:border-muted-foreground"
-                        }`}
+                          }`}
                       >
                         <Icon className={`h-8 w-8 ${color}`} />
                         <span className="text-sm font-medium">{label}</span>
@@ -224,12 +287,15 @@ const Mind = () => {
                     className="gap-2"
                     disabled={entries.length === 0}
                     onClick={() => {
-                      resetEntries([]);
+                      // Reset logic if needed, or just clear local state? 
+                      // Deleting from DB might be too aggressive for a "Reset" button without confirmation
+                      // For now, let's just clear the local view or maybe remove the button if not needed
+                      setEntries([]);
                       setAiFeedback("");
                     }}
                   >
                     <RefreshCcw className="h-4 w-4" />
-                    Reset history
+                    Reset view
                   </Button>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -290,7 +356,7 @@ const Mind = () => {
               entries.map((entry) => {
                 const MoodIcon = moods.find((m) => m.value === entry.mood)?.icon || Smile;
                 const moodColor = moods.find((m) => m.value === entry.mood)?.color;
-                const entryDate = new Date(entry.createdAt);
+                const entryDate = new Date(entry.created_at);
                 return (
                   <Card key={entry.id} className="shadow-soft">
                     <CardHeader>
@@ -320,3 +386,4 @@ const Mind = () => {
 };
 
 export default Mind;
+

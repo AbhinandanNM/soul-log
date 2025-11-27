@@ -23,7 +23,7 @@ declare global {
 }
 
 const {
-  CLIENT_URL = "http://localhost:5173",
+  CLIENT_URL = "http://localhost:8080",
   GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET,
   GOOGLE_CALLBACK_URL,
@@ -334,7 +334,7 @@ const getCallbackURL = () => {
   
   if (NODE_ENV === "production") {
     // In Vercel, prioritize CLIENT_URL, then VERCEL_URL
-    const baseUrl = CLIENT_URL && CLIENT_URL !== "http://localhost:5173"
+    const baseUrl = CLIENT_URL && CLIENT_URL !== "http://localhost:8080"
       ? CLIENT_URL
       : process.env.VERCEL_URL 
         ? `https://${process.env.VERCEL_URL}` 

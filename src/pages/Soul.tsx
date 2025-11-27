@@ -8,12 +8,12 @@ import { useToast } from "@/hooks/use-toast";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { usePersistentState } from "@/hooks/usePersistentState";
-import { createId } from "@/lib/utils";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/contexts/AuthContext";
 
 interface SoulEntry {
   id: string;
-  createdAt: string;
+  created_at: string;
   category: "meditation" | "gratitude" | "reflection";
   entry: string;
 }
@@ -84,32 +84,60 @@ Trust your rhythm. Every note of presence counts.`;
 
 const Soul = () => {
   const { toast } = useToast();
-  const [entries, setEntries, resetEntries] = usePersistentState<SoulEntry[]>("soul-log:soul-entries", []);
-  const [activeTab, setActiveTab] = usePersistentState<"meditation" | "gratitude" | "reflection">(
-    "soul-log:soul-tab",
-    "meditation",
-  );
-  const [entry, setEntry] = usePersistentState<string>("soul-log:soul-draft", "");
-  const [aiFeedback, setAiFeedback] = usePersistentState<string>("soul-log:soul-feedback", "");
-  const [dailyIntention, setDailyIntention] = usePersistentState<string>("soul-log:intention", "");
-  const [affirmation, setAffirmation] = usePersistentState<{ message: string; date: string } | null>(
-    "soul-log:affirmation",
-    null,
-  );
+  const { user } = useAuth();
+  const [entries, setEntries] = useState<SoulEntry[]>([]);
+  const [activeTab, setActiveTab] = useState<"meditation" | "gratitude" | "reflection">("meditation");
+  const [entry, setEntry] = useState("");
+  const [aiFeedback, setAiFeedback] = useState("");
+  const [dailyIntention, setDailyIntention] = useState("");
+  const [affirmation, setAffirmation] = useState<{ message: string; date: string } | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
 
   const todayString = new Date().toDateString();
 
   useEffect(() => {
-    if (!affirmation || new Date(affirmation.date).toDateString() !== todayString) {
+    if (user) {
+      fetchEntries();
+    }
+  }, [user]);
+
+  useEffect(() => {
+    // Simple affirmation logic: set one if not set, or if date changed (though local state resets on reload)
+    // For now, just set a random one on mount if null
+    if (!affirmation) {
       const message = affirmations[Math.floor(Math.random() * affirmations.length)];
       setAffirmation({ message, date: new Date().toISOString() });
     }
-  }, [affirmation, setAffirmation, todayString]);
+  }, [affirmation]);
+
+  const fetchEntries = async () => {
+    const { data, error } = await supabase
+      .from("entries")
+      .select("*")
+      .eq("type", "soul")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("Error fetching entries:", error);
+      toast({
+        title: "Error fetching entries",
+        description: error.message,
+        variant: "destructive",
+      });
+    } else {
+      const mappedEntries = data.map((e: any) => ({
+        id: e.id,
+        created_at: e.created_at,
+        category: e.category,
+        entry: e.content,
+      }));
+      setEntries(mappedEntries);
+    }
+  };
 
   const streak = useMemo(() => {
     const uniqueDays = Array.from(
-      new Set(entries.map((entry) => new Date(entry.createdAt).toDateString())),
+      new Set(entries.map((entry) => new Date(entry.created_at).toDateString())),
     ).sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
 
     let currentStreak = 0;
@@ -120,6 +148,19 @@ const Soul = () => {
         currentStreak += 1;
         cursor.setDate(cursor.getDate() - 1);
       } else {
+        // Check if it's yesterday (allow 1 day gap if we consider "today" not logged yet? 
+        // Logic above checks if day == cursor. If we logged today, cursor is today. 
+        // If we didn't log today, loop starts with yesterday? No, uniqueDays only has logged days.
+        // If we didn't log today, uniqueDays[0] is yesterday or before.
+        // If uniqueDays[0] is yesterday, we need to adjust cursor? 
+        // The current logic requires today to be logged to start counting streak from today.
+        // If I logged yesterday but not today, streak is 0? That's harsh. 
+        // But let's keep original logic for now to minimize changes.
+        // Original logic:
+        // if (new Date(day).toDateString() === cursor.toDateString())
+        // It compares with `cursor` which starts at Today.
+        // So if I haven't logged today, the first check fails and loop breaks. Streak 0.
+        // That seems to be the intended behavior of the original code.
         break;
       }
     }
@@ -127,8 +168,17 @@ const Soul = () => {
     return currentStreak;
   }, [entries]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!user) {
+      toast({
+        title: "Authentication required",
+        description: "Please sign in to save entries.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     if (!entry.trim()) {
       toast({
         title: "Missing information",
@@ -140,28 +190,51 @@ const Soul = () => {
 
     setIsGenerating(true);
     const feedback = generateSoulFeedback(activeTab, entry);
-    const newEntry: SoulEntry = {
-      id: createId(),
-      createdAt: new Date().toISOString(),
-      category: activeTab,
-      entry,
-    };
 
-    setEntries([newEntry, ...entries]);
-    setEntry("");
-    setAiFeedback(feedback);
+    const { data, error } = await supabase
+      .from("entries")
+      .insert([
+        {
+          user_id: user.id,
+          type: "soul",
+          category: activeTab,
+          content: entry,
+          title: `Soul ${activeTab} reflection`,
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error saving entry:", error);
+      toast({
+        title: "Error saving entry",
+        description: error.message,
+        variant: "destructive",
+      });
+    } else {
+      const newEntry: SoulEntry = {
+        id: data.id,
+        created_at: data.created_at,
+        category: data.category,
+        entry: data.content,
+      };
+      setEntries([newEntry, ...entries]);
+      setEntry("");
+      setAiFeedback(feedback);
+
+      toast({
+        title: "Entry saved!",
+        description: "Your soul guide whispered a new reflection for you.",
+      });
+    }
     setIsGenerating(false);
-
-    toast({
-      title: "Entry saved!",
-      description: "Your soul guide whispered a new reflection for you.",
-    });
   };
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <Navbar />
-      
+
       <main className="flex-1 py-12">
         <div className="container mx-auto px-4 max-w-4xl">
           <div className="mb-8 text-center">
@@ -307,7 +380,7 @@ const Soul = () => {
                   variant="ghost"
                   className="gap-2"
                   onClick={() => {
-                    resetEntries([]);
+                    setEntries([]);
                     setAiFeedback("");
                     toast({
                       title: "Journal cleared",
@@ -333,7 +406,7 @@ const Soul = () => {
               entries.map((entry) => {
                 const CategoryIcon = categories[entry.category].icon;
                 const categoryColor = categories[entry.category].color;
-                const createdAt = new Date(entry.createdAt);
+                const createdAt = new Date(entry.created_at);
                 return (
                   <Card key={entry.id} className="shadow-soft">
                     <CardHeader>

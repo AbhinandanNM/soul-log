@@ -33,10 +33,10 @@ npm run dev   # http://localhost:4000
 ```bash
 cd thought-retrace-main
 npm install
-npm run dev   # http://localhost:5173
+npm run dev   # http://localhost:8080
 ```
 
-Visit `http://localhost:5173` and sign in with Google to start journaling.
+Visit `http://localhost:8080` and sign in with Google to start journaling.
 
 ### Tech stack
 

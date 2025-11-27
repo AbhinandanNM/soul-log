@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Dumbbell, Plus, Sparkles, Apple, Droplets, Flame, RefreshCcw, Droplet } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,12 +9,12 @@ import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
-import { usePersistentState } from "@/hooks/usePersistentState";
-import { createId } from "@/lib/utils";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/contexts/AuthContext";
 
 interface BodyEntry {
   id: string;
-  createdAt: string;
+  created_at: string;
   category: "exercise" | "nutrition" | "hydration";
   entry: string;
 }
@@ -66,7 +66,7 @@ const generateBodyFeedback = (category: BodyEntry["category"], entry: string) =>
 
   return `${encouragement[category]}
 
-You captured: “${summary || "..." }”
+You captured: “${summary || "..."}”
 
 Try this next:
 • ${advice[category][0]}
@@ -77,16 +77,45 @@ Remember to celebrate the effort, not just the outcome.`;
 
 const Body = () => {
   const { toast } = useToast();
-  const [entries, setEntries, resetEntries] = usePersistentState<BodyEntry[]>("soul-log:body-entries", []);
-  const [activeTab, setActiveTab] = usePersistentState<"exercise" | "nutrition" | "hydration">(
-    "soul-log:body-tab",
-    "exercise",
-  );
-  const [entry, setEntry] = usePersistentState<string>("soul-log:body-draft", "");
-  const [aiFeedback, setAiFeedback] = usePersistentState<string>("soul-log:body-feedback", "");
-  const [hydrationGoal, setHydrationGoal] = usePersistentState<number>("soul-log:hydration-goal", 8);
-  const [hydrationProgress, setHydrationProgress] = usePersistentState<number>("soul-log:hydration-progress", 0);
+  const { user } = useAuth();
+  const [entries, setEntries] = useState<BodyEntry[]>([]);
+  const [activeTab, setActiveTab] = useState<"exercise" | "nutrition" | "hydration">("exercise");
+  const [entry, setEntry] = useState("");
+  const [aiFeedback, setAiFeedback] = useState("");
+  const [hydrationGoal, setHydrationGoal] = useState(8);
+  const [hydrationProgress, setHydrationProgress] = useState(0);
   const [isGenerating, setIsGenerating] = useState(false);
+
+  useEffect(() => {
+    if (user) {
+      fetchEntries();
+    }
+  }, [user]);
+
+  const fetchEntries = async () => {
+    const { data, error } = await supabase
+      .from("entries")
+      .select("*")
+      .eq("type", "body")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("Error fetching entries:", error);
+      toast({
+        title: "Error fetching entries",
+        description: error.message,
+        variant: "destructive",
+      });
+    } else {
+      const mappedEntries = data.map((e: any) => ({
+        id: e.id,
+        created_at: e.created_at,
+        category: e.category,
+        entry: e.content, // Map content to entry
+      }));
+      setEntries(mappedEntries);
+    }
+  };
 
   const bodyStats = useMemo(() => {
     const totals = entries.reduce(
@@ -100,13 +129,22 @@ const Body = () => {
     const latestEntry = entries[0];
     return {
       totals,
-      lastCheckIn: latestEntry ? new Date(latestEntry.createdAt).toLocaleString() : "Log your first entry",
+      lastCheckIn: latestEntry ? new Date(latestEntry.created_at).toLocaleString() : "Log your first entry",
       hydrationPercent: hydrationGoal ? Math.min(100, Math.round((hydrationProgress / hydrationGoal) * 100)) : 0,
     };
   }, [entries, hydrationGoal, hydrationProgress]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!user) {
+      toast({
+        title: "Authentication required",
+        description: "Please sign in to save entries.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     if (!entry.trim()) {
       toast({
         title: "Missing information",
@@ -118,28 +156,51 @@ const Body = () => {
 
     setIsGenerating(true);
     const feedback = generateBodyFeedback(activeTab, entry);
-    const newEntry: BodyEntry = {
-      id: createId(),
-      createdAt: new Date().toISOString(),
-      category: activeTab,
-      entry,
-    };
 
-    setEntries([newEntry, ...entries]);
-    setEntry("");
-    setAiFeedback(feedback);
+    const { data, error } = await supabase
+      .from("entries")
+      .insert([
+        {
+          user_id: user.id,
+          type: "body",
+          category: activeTab,
+          content: entry,
+          title: `Body ${activeTab} update`, // Adding a title for consistency
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error saving entry:", error);
+      toast({
+        title: "Error saving entry",
+        description: error.message,
+        variant: "destructive",
+      });
+    } else {
+      const newEntry: BodyEntry = {
+        id: data.id,
+        created_at: data.created_at,
+        category: data.category,
+        entry: data.content,
+      };
+      setEntries([newEntry, ...entries]);
+      setEntry("");
+      setAiFeedback(feedback);
+
+      toast({
+        title: "Entry saved!",
+        description: "Your body coach crafted new guidance for you.",
+      });
+    }
     setIsGenerating(false);
-
-    toast({
-      title: "Entry saved!",
-      description: "Your body coach crafted new guidance for you.",
-    });
   };
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <Navbar />
-      
+
       <main className="flex-1 py-12">
         <div className="container mx-auto px-4 max-w-4xl">
           <div className="mb-8 text-center">
@@ -322,7 +383,7 @@ const Body = () => {
                   variant="ghost"
                   className="gap-2"
                   onClick={() => {
-                    resetEntries([]);
+                    setEntries([]);
                     setAiFeedback("");
                     toast({
                       title: "Journal cleared",
@@ -348,7 +409,7 @@ const Body = () => {
               entries.map((entry) => {
                 const CategoryIcon = categories[entry.category].icon;
                 const categoryColor = categories[entry.category].color;
-                const entryDate = new Date(entry.createdAt);
+                const entryDate = new Date(entry.created_at);
                 return (
                   <Card key={entry.id} className="shadow-soft">
                     <CardHeader>
